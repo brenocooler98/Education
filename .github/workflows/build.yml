@@ -12,6 +12,7 @@ on:
           - arm64
           - arm32
           - x86_64
+
       build_type:
         description: "Build configuration"
         required: true
@@ -34,12 +35,14 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "2"
+      ANDROID_API: "24"
+      NDK_VERSION: "27.2.12479018"
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: |
@@ -54,32 +57,44 @@ jobs:
           java-version: "17"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
-      - name: Install Android packages
+      - name: Install Android Dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
+          yes | sdkmanager --licenses > /dev/null || true
+
           sdkmanager --install \
-            "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
-            "ndk;27.2.12479018"
+            "ndk;${NDK_VERSION}"
 
       - name: Configure Android NDK
         shell: bash
         run: |
-          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          set -euo pipefail
+
+          NDK="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          TOOLCHAIN="${NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          test -d "$TOOLCHAIN"
+
           echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
 
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
           echo "$TOOLCHAIN" >> "$GITHUB_PATH"
 
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$TOOLCHAIN/armv7a-linux-androideabi24-clang" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$TOOLCHAIN/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
 
-      - name: Select architecture
+          echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=${TOOLCHAIN}/armv7a-linux-androideabi24-clang" >> "$GITHUB_ENV"
+
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+
+      - name: Select Android Architecture
         id: target
         shell: bash
         run: |
@@ -93,24 +108,39 @@ jobs:
             x86_64)
               echo "triple=x86_64-linux-android" >> "$GITHUB_OUTPUT"
               ;;
+            *)
+              echo "Unsupported architecture"
+              exit 1
+              ;;
           esac
 
-      - name: Cache Rust
+      - name: Cache Rust Dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: android-${{ inputs.architecture }}
+          key: education-android-${{ inputs.architecture }}
 
-      - name: Install cargo-apk
-        run: cargo install cargo-apk --locked
-
-      - name: Check Android library
+      - name: Install Cargo APK
+        shell: bash
         run: |
-          cargo check --lib \
-            --target ${{ steps.target.outputs.triple }}
+          cargo install cargo-apk --locked
+
+      - name: Verify Rust Project
+        shell: bash
+        run: |
+          cargo metadata --no-deps --format-version 1 > /dev/null
+
+      - name: Check Android Library
+        shell: bash
+        run: |
+          cargo check \
+            --lib \
+            --target "${{ steps.target.outputs.triple }}"
 
       - name: Build Android APK
         shell: bash
         run: |
+          set -euo pipefail
+
           TARGET="${{ steps.target.outputs.triple }}"
 
           if [ "${{ inputs.build_type }}" = "release" ]; then
@@ -124,10 +154,29 @@ jobs:
               --target "$TARGET"
           fi
 
-      - name: Upload APK
+      - name: Locate Android APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          find target -type f -name "*.apk" \
+            -exec cp {} dist/ \;
+
+          if ! find dist -maxdepth 1 -name "*.apk" | grep -q .; then
+            echo "No APK was generated."
+            exit 1
+          fi
+
+          ls -lh dist/
+
+      - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
           name: Education-Android-${{ inputs.architecture }}-${{ inputs.build_type }}
-          path: target/**/*.apk
+          path: dist/*.apk
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
