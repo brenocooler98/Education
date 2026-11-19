@@ -1,0 +1,133 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: "Android architecture"
+        required: true
+        default: "arm64"
+        type: choice
+        options:
+          - arm64
+          - arm32
+          - x86_64
+      build_type:
+        description: "Build configuration"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - debug
+          - release
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: |
+            aarch64-linux-android
+            armv7-linux-androideabi
+            x86_64-linux-android
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018"
+
+      - name: Configure Android NDK
+        shell: bash
+        run: |
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          echo "$TOOLCHAIN" >> "$GITHUB_PATH"
+
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$TOOLCHAIN/armv7a-linux-androideabi24-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$TOOLCHAIN/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+
+      - name: Select architecture
+        id: target
+        shell: bash
+        run: |
+          case "${{ inputs.architecture }}" in
+            arm64)
+              echo "triple=aarch64-linux-android" >> "$GITHUB_OUTPUT"
+              ;;
+            arm32)
+              echo "triple=armv7-linux-androideabi" >> "$GITHUB_OUTPUT"
+              ;;
+            x86_64)
+              echo "triple=x86_64-linux-android" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android-${{ inputs.architecture }}
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+
+      - name: Check Android library
+        run: |
+          cargo check --lib \
+            --target ${{ steps.target.outputs.triple }}
+
+      - name: Build Android APK
+        shell: bash
+        run: |
+          TARGET="${{ steps.target.outputs.triple }}"
+
+          if [ "${{ inputs.build_type }}" = "release" ]; then
+            cargo apk build \
+              --lib \
+              --release \
+              --target "$TARGET"
+          else
+            cargo apk build \
+              --lib \
+              --target "$TARGET"
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Education-Android-${{ inputs.architecture }}-${{ inputs.build_type }}
+          path: target/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
